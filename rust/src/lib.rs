@@ -440,31 +440,26 @@ impl MobileConvexClient {
                 msg: e.to_string(),
             })??;
 
-        match response.get("status").and_then(|s| s.as_str()) {
-            Some("success") => {
-                let value = &response["value"];
-                serde_json::to_string(value).map_err(|e| ClientError::InternalError {
-                    msg: e.to_string(),
-                })
-            }
-            Some("error") => {
-                let error_msg = response
-                    .get("errorMessage")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| response.get("error").and_then(|v| v.as_str()))
-                    .unwrap_or("Unknown server error");
-                Err(ClientError::ServerError {
-                    msg: error_msg.to_string(),
-                })
-            }
-            _ => {
-                // Unexpected response shape — include full body for debugging
-                let body = serde_json::to_string(&response)
-                    .unwrap_or_else(|_| format!("{:?}", response));
-                Err(ClientError::ServerError {
-                    msg: format!("Unexpected response from run_test_function: {}", body),
-                })
-            }
+        if response.get("status").and_then(|s| s.as_str()) == Some("success") {
+            let value = &response["value"];
+            serde_json::to_string(value).map_err(|e| ClientError::InternalError {
+                msg: e.to_string(),
+            })
+        } else {
+            // Error formats:
+            //   {"status":"error", "errorMessage":"..."}
+            //   {"code":"InvalidModules", "message":"..."}
+            let error_msg = response
+                .get("errorMessage")
+                .or_else(|| response.get("message"))
+                .or_else(|| response.get("error"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    serde_json::to_string(&response)
+                        .unwrap_or_else(|_| "Unknown error".into())
+                });
+            Err(ClientError::ServerError { msg: error_msg })
         }
     }
 }
