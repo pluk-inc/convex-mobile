@@ -100,6 +100,7 @@ struct MobileConvexClient {
     client_id: String,
     web_socket_state_subscriber: Option<Arc<dyn WebSocketStateSubscriber>>,
     client: OnceCell<ConvexClient>,
+    deploy_key: Mutex<Option<String>>,
     rt: tokio::runtime::Runtime,
 }
 
@@ -125,6 +126,7 @@ impl MobileConvexClient {
             client_id,
             web_socket_state_subscriber,
             client: OnceCell::new(),
+            deploy_key: Mutex::new(None),
             rt,
         }
     }
@@ -345,6 +347,125 @@ impl MobileConvexClient {
             .spawn(async move { client.set_auth_callback(fetcher).await })
             .await
             .map_err(|e| e.into())
+    }
+
+    /// Set admin authentication using a deploy key from your Convex dashboard.
+    ///
+    /// This allows the client to perform administrative operations. Optionally,
+    /// you can specify `acting_as` to impersonate a specific user during admin operations.
+    pub async fn set_admin_auth(&self, deploy_key: String, acting_as: Option<String>) -> Result<(), ClientError> {
+        Ok(self.internal_set_admin_auth(deploy_key, acting_as).await?)
+    }
+
+    async fn internal_set_admin_auth(&self, deploy_key: String, _acting_as: Option<String>) -> anyhow::Result<()> {
+        let mut client = self.connected_client().await?;
+
+        // Store the deploy key for HTTP-based calls (e.g. run_test_function)
+        *self.deploy_key.lock() = Some(deploy_key.clone());
+
+        // For now, we'll only support basic admin auth without acting_as
+        // TODO: Add proper UserIdentityAttributes support when needed
+        self.rt
+            .spawn(async move { client.set_admin_auth(deploy_key, None).await })
+            .await
+            .map_err(|e| e.into())
+    }
+
+    /// Execute arbitrary JavaScript code on the Convex backend via the
+    /// `run_test_function` HTTP endpoint.
+    ///
+    /// Requires a prior call to `set_admin_auth` with a valid deploy key.
+    ///
+    /// - `source`: JavaScript source code (plain JS, no TypeScript).
+    /// - `args`: JSON string of arguments, e.g. "{}".
+    /// - `component_id`: Optional component ID for multi-component deployments.
+    ///
+    /// Returns the result `value` as a JSON string on success.
+    pub async fn run_test_function(
+        &self,
+        source: String,
+        args: String,
+        component_id: Option<String>,
+    ) -> Result<String, ClientError> {
+        let deploy_key = self.deploy_key.lock().clone().ok_or_else(|| {
+            ClientError::InternalError {
+                msg: "No deploy key set. Call set_admin_auth first.".into(),
+            }
+        })?;
+
+        let args_value: serde_json::Value = serde_json::from_str(&args).map_err(|e| {
+            ClientError::InternalError {
+                msg: format!("Invalid JSON args: {e}"),
+            }
+        })?;
+
+        let mut body = serde_json::json!({
+            "adminKey": deploy_key,
+            "bundle": {
+                "path": "testQuery.js",
+                "source": source,
+            },
+            "args": args_value,
+            "format": "convex_encoded_json",
+        });
+
+        if let Some(cid) = component_id {
+            body["componentId"] = serde_json::Value::String(cid);
+        }
+
+        let url = format!("{}/api/run_test_function", self.deployment_url);
+
+        let response: serde_json::Value = self
+            .rt
+            .spawn(async move {
+                let client = reqwest::Client::new();
+                let resp = client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| ClientError::InternalError {
+                        msg: e.to_string(),
+                    })?;
+
+                resp.json::<serde_json::Value>()
+                    .await
+                    .map_err(|e| ClientError::InternalError {
+                        msg: e.to_string(),
+                    })
+            })
+            .await
+            .map_err(|e| ClientError::InternalError {
+                msg: e.to_string(),
+            })??;
+
+        match response.get("status").and_then(|s| s.as_str()) {
+            Some("success") => {
+                let value = &response["value"];
+                serde_json::to_string(value).map_err(|e| ClientError::InternalError {
+                    msg: e.to_string(),
+                })
+            }
+            Some("error") => {
+                let error_msg = response
+                    .get("errorMessage")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| response.get("error").and_then(|v| v.as_str()))
+                    .unwrap_or("Unknown server error");
+                Err(ClientError::ServerError {
+                    msg: error_msg.to_string(),
+                })
+            }
+            _ => {
+                // Unexpected response shape — include full body for debugging
+                let body = serde_json::to_string(&response)
+                    .unwrap_or_else(|_| format!("{:?}", response));
+                Err(ClientError::ServerError {
+                    msg: format!("Unexpected response from run_test_function: {}", body),
+                })
+            }
+        }
     }
 }
 
