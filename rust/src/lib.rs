@@ -117,6 +117,10 @@ impl MobileConvexClient {
         client_id: String,
         web_socket_state_subscriber: Option<Arc<dyn WebSocketStateSubscriber>>,
     ) -> MobileConvexClient {
+        // Install aws-lc-rs as the process-level CryptoProvider for rustls.
+        // Required when both aws-lc-rs and ring features are compiled in.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
