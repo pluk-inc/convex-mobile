@@ -27,6 +27,7 @@ done
 
 
 simulator_lib_dir="target/ios-simulator/release"
+macos_universal_lib_dir="target/macos-universal/release"
 
 generate_ffi() {
   echo "Generating framework module mapping and FFI bindings"
@@ -37,9 +38,21 @@ generate_ffi() {
 }
 
 create_simulator_lib() {
-  echo "Creating a library for aarch64 simulator"
+  echo "Creating a universal library for simulators (arm64 + x86_64)"
   mkdir -p $simulator_lib_dir
-  lipo -create target/aarch64-apple-ios-sim/release/lib$1.a -output $simulator_lib_dir/lib$1.a
+  lipo -create \
+    target/aarch64-apple-ios-sim/release/lib$1.a \
+    target/x86_64-apple-ios/release/lib$1.a \
+    -output $simulator_lib_dir/lib$1.a
+}
+
+create_macos_universal_lib() {
+  echo "Creating a universal library for macOS (arm64 + x86_64)"
+  mkdir -p $macos_universal_lib_dir
+  lipo -create \
+    target/aarch64-apple-darwin/release/lib$1.a \
+    target/x86_64-apple-darwin/release/lib$1.a \
+    -output $macos_universal_lib_dir/lib$1.a
 }
 
 build_xcframework() {
@@ -49,25 +62,33 @@ build_xcframework() {
   xcodebuild -create-xcframework \
     -library target/aarch64-apple-ios/release/lib$1.a -headers target/uniffi-xcframework-staging \
     -library target/ios-simulator/release/lib$1.a -headers target/uniffi-xcframework-staging \
-    -library target/aarch64-apple-darwin/release/lib$1.a -headers target/uniffi-xcframework-staging \
+    -library target/macos-universal/release/lib$1.a -headers target/uniffi-xcframework-staging \
     -output target/ios/lib$1-rs.xcframework
   cp -R target/ios/lib$1-rs.xcframework ../ios
 
   if $release; then
     echo "Building xcframework archive"
-    zip -r target/ios/lib$1-rs.xcframework.zip target/ios/lib$1-rs.xcframework
+    cd target/ios && zip -r lib$1-rs.xcframework.zip lib$1-rs.xcframework && cd ../..
     checksum=$(swift package compute-checksum target/ios/lib$1-rs.xcframework.zip)
-    version=$(cargo metadata --format-version 1 | jq -r '.packages[] | select(.name=="foobar") .version')
+    version=$(cargo metadata --format-version 1 | jq -r '.packages[] | select(.name=="convex-mobile") .version')
     sed -i "" -E "s/(let releaseTag = \")[^\"]+(\")/\1$version\2/g" ../ios/Package.swift
     sed -i "" -E "s/(let releaseChecksum = \")[^\"]+(\")/\1$checksum\2/g" ../ios/Package.swift
   fi
 }
 
-cargo build --lib --release --target aarch64-apple-ios-sim
-cargo build --lib --release --target aarch64-apple-ios
+# IPHONEOS_DEPLOYMENT_TARGET=16.0 is required to avoid a linker error when
+# aws-lc-sys Kyber PQC objects (compiled against iOS 26.x SDK) reference
+# ___chkstk_darwin, a stack guard symbol not present before iOS 13.
+IPHONEOS_DEPLOYMENT_TARGET=16.0 cargo build --lib --release --target aarch64-apple-ios-sim
+IPHONEOS_DEPLOYMENT_TARGET=16.0 cargo build --lib --release --target aarch64-apple-ios
 cargo build --lib --release --target aarch64-apple-darwin
+
+# x86_64 targets (Intel Mac support)
+IPHONEOS_DEPLOYMENT_TARGET=16.0 cargo build --lib --release --target x86_64-apple-ios
+cargo build --lib --release --target x86_64-apple-darwin
 
 basename=convexmobile
 generate_ffi $basename
 create_simulator_lib $basename
+create_macos_universal_lib $basename
 build_xcframework $basename
