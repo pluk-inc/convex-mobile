@@ -76,15 +76,22 @@ build_xcframework() {
   fi
 }
 
-# IPHONEOS_DEPLOYMENT_TARGET=16.0 is required to avoid a linker error when
-# aws-lc-sys Kyber PQC objects (compiled against iOS 26.x SDK) reference
-# ___chkstk_darwin, a stack guard symbol not present before iOS 13.
-IPHONEOS_DEPLOYMENT_TARGET=16.0 cargo build --lib --release --target aarch64-apple-ios-sim
-IPHONEOS_DEPLOYMENT_TARGET=16.0 cargo build --lib --release --target aarch64-apple-ios
+# Deployment targets must be pinned so the resulting static libs aren't stamped
+# with the host SDK version (e.g. macOS 26 / iOS 26 on an Xcode 26 machine),
+# which causes "object file was built for newer version" linker errors in
+# consumer apps that target older OS versions.
+# IPHONEOS_DEPLOYMENT_TARGET=16.0 is also required to avoid a linker error when
+# aws-lc-sys Kyber PQC objects reference ___chkstk_darwin, a stack guard symbol
+# not present before iOS 13.
+export IPHONEOS_DEPLOYMENT_TARGET=16.0
+export MACOSX_DEPLOYMENT_TARGET=13.0
+
+cargo build --lib --release --target aarch64-apple-ios-sim
+cargo build --lib --release --target aarch64-apple-ios
 cargo build --lib --release --target aarch64-apple-darwin
 
 # x86_64 targets (Intel Mac support)
-IPHONEOS_DEPLOYMENT_TARGET=16.0 cargo build --lib --release --target x86_64-apple-ios
+cargo build --lib --release --target x86_64-apple-ios
 cargo build --lib --release --target x86_64-apple-darwin
 
 basename=convexmobile
